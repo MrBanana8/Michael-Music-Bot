@@ -2,7 +2,7 @@ import os
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
-from music import Song, get_player, get_or_create_player, remove_player
+from music import Song, is_playlist_url, get_player, get_or_create_player, remove_player
 
 load_dotenv()
 
@@ -36,13 +36,21 @@ async def play(interaction: discord.Interaction, query: str):
         player.voice_client = await interaction.user.voice.channel.connect()
 
     try:
-        song = await Song.from_query(query, client.loop)
-        await player.add_song(song)
-
-        if player.current == song:
-            await interaction.followup.send(f'🎵 Now playing: **{song.title}**')
+        if is_playlist_url(query):
+            songs = await Song.from_playlist(query, client.loop)
+            if not songs:
+                await interaction.followup.send('No songs found in the playlist.')
+                return
+            await player.add_songs(songs)
+            await interaction.followup.send(f'✅ Added **{len(songs)}** songs from playlist to the queue.')
         else:
-            await interaction.followup.send(f'✅ Added to queue: **{song.title}**')
+            song = await Song.from_query(query, client.loop)
+            await player.add_song(song)
+
+            if player.current == song:
+                await interaction.followup.send(f'🎵 Now playing: **{song.title}**')
+            else:
+                await interaction.followup.send(f'✅ Added to queue: **{song.title}**')
     except Exception as e:
         print(f'Play error: {e}')
         await interaction.followup.send('Error playing the song. Please try again.')

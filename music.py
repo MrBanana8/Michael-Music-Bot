@@ -1,4 +1,5 @@
 import asyncio
+import re
 import discord
 import yt_dlp
 
@@ -11,17 +12,39 @@ YDL_OPTIONS = {
     'source_address': '0.0.0.0',
 }
 
+YDL_PLAYLIST_OPTIONS = {
+    'extract_flat': 'in_playlist',
+    'quiet': True,
+    'no_warnings': True,
+    'source_address': '0.0.0.0',
+}
+
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn',
 }
 
+PLAYLIST_PATTERN = re.compile(r'[?&]list=')
+
+
+def is_playlist_url(query: str) -> bool:
+    return query.startswith('http') and bool(PLAYLIST_PATTERN.search(query))
+
 
 class Song:
-    def __init__(self, title: str, url: str, stream_url: str):
+    def __init__(self, title: str, url: str, stream_url: str | None = None):
         self.title = title
         self.url = url
         self.stream_url = stream_url
+
+    async def ensure_stream_url(self, loop: asyncio.AbstractEventLoop):
+        if self.stream_url:
+            return
+        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+            data = await loop.run_in_executor(None, lambda: ydl.extract_info(self.url, download=False))
+            if 'entries' in data:
+                data = data['entries'][0]
+            self.stream_url = data.get('url')
 
     @classmethod
     async def from_query(cls, query: str, loop: asyncio.AbstractEventLoop):
@@ -40,6 +63,20 @@ class Song:
                 stream_url=data.get('url')
             )
 
+    @classmethod
+    async def from_playlist(cls, url: str, loop: asyncio.AbstractEventLoop) -> list['Song']:
+        with yt_dlp.YoutubeDL(YDL_PLAYLIST_OPTIONS) as ydl:
+            data = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+
+        songs = []
+        for entry in data.get('entries', []):
+            if entry:
+                songs.append(cls(
+                    title=entry.get('title', 'Unknown'),
+                    url=entry.get('url') or entry.get('webpage_url', ''),
+                ))
+        return songs
+
 
 class MusicPlayer:
     def __init__(self, guild_id: int):
@@ -56,6 +93,7 @@ class MusicPlayer:
 
         self.current = self.queue.pop(0)
 
+        await self.current.ensure_stream_url(self.voice_client.loop)
         source = discord.FFmpegPCMAudio(self.current.stream_url, **FFMPEG_OPTIONS)
 
         def after_playing(error):
@@ -70,6 +108,11 @@ class MusicPlayer:
 
     async def add_song(self, song: Song):
         self.queue.append(song)
+        if not self.voice_client.is_playing() and not self.voice_client.is_paused():
+            await self.play_next()
+
+    async def add_songs(self, songs: list[Song]):
+        self.queue.extend(songs)
         if not self.voice_client.is_playing() and not self.voice_client.is_paused():
             await self.play_next()
 
